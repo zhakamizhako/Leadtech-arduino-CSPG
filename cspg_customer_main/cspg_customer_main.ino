@@ -1,3 +1,5 @@
+#include <Streaming.h> // Easy Serial out
+
 #define VERSION "v0.001b" // Software Version
 #define DEV_MESSAGE "Roland Kim Andre Solon"
 #define BUILD_NUMBER "Build 0001 06/16/19"
@@ -27,7 +29,11 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
 // Init the DS1302
 // Set pins:  CE, IO,CLK
 DS1302RTC RTC(5, 6, 7);
-
+time_t timeLeft; // must be a unix value
+time_t t = now();
+int rate= 60; // Rate per tap. 
+int pin_OUTPUT = 3;
+boolean active=false;
 char strTime[9]; //Lateral time string variable to display
 char strDate[15]; //Lateral time string variable to display
 
@@ -71,6 +77,8 @@ void draw_str(unsigned int x, unsigned int y, const char *s) {
 void setup()
 {
   pinMode(8, OUTPUT);
+  pinMode(pin_OUTPUT, OUTPUT);
+  digitalWrite(pin_OUTPUT, LOW);
   Serial.begin(115200);
   Serial.println("[SYS][BOOT]CPSG System");
   Serial.println(BUILD_NUMBER);
@@ -80,7 +88,6 @@ void setup()
   //reset OLED display
   digitalWrite(8, LOW);
   digitalWrite(8, HIGH);
-  digitalWrite(2, LOW);
 //  readRAM( uint8_t *p);
 //  writeRAM(uint8_t *p);
   
@@ -132,6 +139,8 @@ void setup()
   SPI.begin();      // Init SPI bus
   mfrc522.PCD_Init();   // Init MFRC522
   mfrc522.PCD_DumpVersionToSerial();  // Show details of PCD - MFRC522 Card Reader details
+
+  //Add something below here that reads the CMOS RAM to read the remaining time. Most likely a UNIX timestamp, write to time_t timeLeft.
 }
 
 void loop()
@@ -145,6 +154,18 @@ void loop()
   if (Serial.available()) { // Time syncer via Serial monitor
     Serial.println("[SYS]Serial Monitor Activity");
     processSyncMessage();
+  }
+
+  if(active){
+    if(now()<timeLeft){
+    Serial << "Time Left: " << timeLeft - now() << "\n";
+    }
+    
+    if(now()>timeLeft){
+      active=false;
+      Serial << "\n[SYS][OUTPUT] Power deactivated.\n";
+      digitalWrite(pin_OUTPUT, LOW);
+    }
   }
   // Warning!
   /*if(timeStatus() != timeSet) {
@@ -161,13 +182,43 @@ void loop()
   // Select one of the cards
   if ( ! mfrc522.PICC_ReadCardSerial()) {
     return;
+  }else {
+    handleReadRFID(); // card read handler
   }
+  
+}
 
+void handleReadRFID() {
+  draw_str("[RFID]Reading IDCARD...");
+  //Add an rfid card validator below here
+  //-----------
   // Dump debug info about the card; PICC_HaltA() is automatically called
   mfrc522.PICC_DumpToSerial(&(mfrc522.uid));
-  draw_str("[RFID]Reading IDCARD...");
-  delay(1000);
+  //Check Card status if card has load
+  //Check if load can handle amount
+  //Write to RFID card the remaining load
+  //Add handler to add to the timeleft
+  
+  //Time handler
+  //TODO: Use the CMOS RAM to store remaining time. Else, shit happens
+  Serial.println("Setting time");
+  
+  handleActive();
+  delay(500);
 //  delay ( 1000 ); // Wait approx 1 sec
+}
+
+void handleActive() {
+  if(!active){
+    active = true;
+    digitalWrite(pin_OUTPUT,HIGH);
+    Serial << "\n[SYS][OUTPUT]Power Active!\n";
+    timeLeft = now() + rate;
+  }else{
+    timeLeft = timeLeft + rate;
+    Serial << "[SYS][OUTPUT]Added";
+  }
+  Serial << "[SYS][EPOCH]=" << timeLeft << "\n";
 }
 
 //Format time in a nice string to be displayed
@@ -273,6 +324,8 @@ void processSyncMessage() {
      if( pctime >= DEFAULT_TIME) { // check the integer is a valid time (greater than Jan 1 2013)
        setTime(pctime); // Sync Arduino clock to the time received on the serial port
        Serial.println("[SYS][CLOCK] Time Set.");
+     }else{
+      Serial.println("[SYS][CLOCK] Time input was rejected.");
      }
   }
 }
