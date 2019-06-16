@@ -177,7 +177,10 @@ void loop()
 
   if(active){
     if(now()<timeLeft){
-    //insert draw timer here
+    time_t a = timeLeft - now();
+//    Serial << second(a);
+    
+    Serial << "\nTime Left:" << timeLeft - now() << "\n";
     }
     
     if(now()>timeLeft){
