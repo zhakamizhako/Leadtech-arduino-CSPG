@@ -23,19 +23,30 @@
 #define TIME_HEADER  "T"   // Header tag for serial time sync message
 #define TIME_REQUEST  7    // ASCII bell character requests a time sync message 
 
+MFRC522::MIFARE_Key key;
 constexpr uint8_t RST_PIN = 9;          // Configurable, see typical pin layout above
 constexpr uint8_t SS_PIN = 10;         // Configurable, see typical pin layout above
 MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
 // Init the DS1302
 // Set pins:  CE, IO,CLK
 DS1302RTC RTC(5, 6, 7);
-time_t timeLeft; // must be a unix value
+time_t timeLeft = now(); // must be a unix value
 time_t t = now();
-int rate= 60; // Rate per tap. 
+int time_rate= 60; // time rate per tap in seconds 
+int load_rate = 10; // Load to decrease from card
 int pin_OUTPUT = 3;
 boolean active=false;
 char strTime[9]; //Lateral time string variable to display
 char strDate[15]; //Lateral time string variable to display
+
+byte sector         = 1;
+byte blockAddr      = 4;
+byte dataBlock[]    = { 
+  0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00  
+};
 
 //u8glib
 U8GLIB_SSD1306_128X64 u8g(18, 20, 26, 24);  // SW SPI Com: SCK = 13, MOSI = 11, CS = 10, A0 = 9
@@ -86,8 +97,8 @@ void setup()
   Serial.println(DEV_MESSAGE);
   Serial.println(UID);
   //reset OLED display
-  digitalWrite(8, LOW);
-  digitalWrite(8, HIGH);
+  digitalWrite(22, LOW);
+  digitalWrite(22, HIGH);
 //  readRAM( uint8_t *p);
 //  writeRAM(uint8_t *p);
   
@@ -139,16 +150,24 @@ void setup()
   SPI.begin();      // Init SPI bus
   mfrc522.PCD_Init();   // Init MFRC522
   mfrc522.PCD_DumpVersionToSerial();  // Show details of PCD - MFRC522 Card Reader details
-
+    // Prepare the key (used both as key A and as key B)
+    // using FFFFFFFFFFFFh which is the default at chip delivery from the factory
+    for (byte i = 0; i < 6; i++) {
+        key.keyByte[i] = 0xFF;
+    }
+  dump_byte_array(key.keyByte, MFRC522::MF_KEY_SIZE);
   //Add something below here that reads the CMOS RAM to read the remaining time. Most likely a UNIX timestamp, write to time_t timeLeft.
 }
 
 void loop()
 {
   // Display time centered on the upper line
-  GetTimeInStr(strTime, hour(), minute(), second());
+  if(!active){
+    GetTimeInStr(strTime, hour(), minute(), second());
   GetDateInStr(strDate, weekday(), month(), day(), year());
   draw_str(strTime, strDate);
+  }
+  
 //  Serial.println(strTime);
 //  Serial.println(strDate);
   if (Serial.available()) { // Time syncer via Serial monitor
@@ -158,7 +177,7 @@ void loop()
 
   if(active){
     if(now()<timeLeft){
-    Serial << "Time Left: " << timeLeft - now() << "\n";
+    //insert draw timer here
     }
     
     if(now()>timeLeft){
@@ -188,24 +207,77 @@ void loop()
   
 }
 
+//Utils
 void handleReadRFID() {
   draw_str("[RFID]Reading IDCARD...");
-  //Add an rfid card validator below here
-  //-----------
-  // Dump debug info about the card; PICC_HaltA() is automatically called
-  mfrc522.PICC_DumpToSerial(&(mfrc522.uid));
-  //Check Card status if card has load
-  //Check if load can handle amount
-  //Write to RFID card the remaining load
-  //Add handler to add to the timeleft
   
-  //Time handler
-  //TODO: Use the CMOS RAM to store remaining time. Else, shit happens
-  Serial.println("Setting time");
-  
-  handleActive();
-  delay(500);
-//  delay ( 1000 ); // Wait approx 1 sec
+  byte trailerBlock   = 7;
+    MFRC522::StatusCode status;
+    byte buffer[18];
+    byte size = sizeof(buffer);
+    
+  status = (MFRC522::StatusCode) mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522.uid));
+    if (status != MFRC522::STATUS_OK) {
+        Serial.print(F("PCD_Authenticate() failed: "));
+        draw_str("RFID Rejected");
+        Serial.println(mfrc522.GetStatusCodeName(status));
+        return;
+    }
+    Serial << "[SYS][RFID] Reading Data";
+    status = (MFRC522::StatusCode) mfrc522.MIFARE_Read(blockAddr, buffer, &size);
+    if (status != MFRC522::STATUS_OK) {
+        draw_str("RFID Data Error");
+        Serial.print(F("MIFARE_Read() failed: "));
+        Serial.println(mfrc522.GetStatusCodeName(status));
+    }
+
+    String load = dump_byte_array(buffer, 16);
+    int load_int = load.toInt();
+    if(load_int - load_rate >= 0){
+      int x = load_int - load_rate;
+      String y = (String)x;
+      Serial << "\n[SYS][RFID] Current Load: " << load << "\n";
+      Serial << "[SYS][RFID] Remaining Load: " << y << "\n";
+      byte tempBuffer[y.length()];
+      for(int m=0;m<y.length();m++){ //copy string to buffer
+        tempBuffer[m] = y[m];
+      }
+      for(int m=0;m<y.length();m++){ //can erase.
+        Serial.println((int)tempBuffer[m]);
+      }
+      for(int m=0;m<16;m++) // initialize dataBlock array
+        dataBlock[m]=0x00;
+      for(int m=0;m<y.length();m++){ // write to dataBlock array
+        dataBlock[m] =y[m];
+      }
+      status = (MFRC522::StatusCode) mfrc522.MIFARE_Write(blockAddr, dataBlock, 16); // Write to RFID
+       if (status != MFRC522::STATUS_OK) {
+        Serial.print(F("MIFARE_Write() failed: "));
+        Serial.println(mfrc522.GetStatusCodeName(status));
+        draw_str("Tap card Error.");
+        delay(2000);
+      }else{
+      String temp = "Bal.: ";
+      temp += y;
+      String line2 = "Loaded!";
+      char screenBuffer[20]; 
+      char screenBuffer2[20];
+      temp.toCharArray(screenBuffer2, temp.length()+1);
+      line2.toCharArray(screenBuffer,line2.length()+1);
+      draw_str(screenBuffer2, screenBuffer);
+      handleActive();
+      delay(1000);  
+      }
+      
+    }else{
+      draw_str("Insufficient Load");
+      Serial << "\n[SYS][RFID] Insufficient Load \n" << "Load Left: " << load_int << "\n";
+      
+      delay(1000);
+    }
+
+    mfrc522.PICC_HaltA();
+    mfrc522.PCD_StopCrypto1();
 }
 
 void handleActive() {
@@ -213,12 +285,13 @@ void handleActive() {
     active = true;
     digitalWrite(pin_OUTPUT,HIGH);
     Serial << "\n[SYS][OUTPUT]Power Active!\n";
-    timeLeft = now() + rate;
+    timeLeft = now() + time_rate;
   }else{
-    timeLeft = timeLeft + rate;
-    Serial << "[SYS][OUTPUT]Added";
+    timeLeft = timeLeft + time_rate;
+    Serial << "\n[SYS][OUTPUT]Added\n";
   }
-  Serial << "[SYS][EPOCH]=" << timeLeft << "\n";
+  //TODO: Use the CMOS RAM to store remaining time. Else, shit happens
+  Serial << "\n[SYS][EPOCH]=" << timeLeft << "\n";
 }
 
 //Format time in a nice string to be displayed
@@ -299,7 +372,7 @@ void GetDateInStr(char * vString, int vWeekday, int vMonth, int vDay, int vYear)
   
   itoa(vMonth, tStr2, 10);
   strcat(tStr1, tStr2);
-  
+
   strcat(tStr1, "-");
 
   itoa(vDay, tStr2, 10);
@@ -314,7 +387,7 @@ void GetDateInStr(char * vString, int vWeekday, int vMonth, int vDay, int vYear)
 }
 //Process Time via Serial Monitor function
 //Should add a verifier for this to avoid cheating.
-//Maybe the number of ticks should do?
+
 void processSyncMessage() {
   unsigned long pctime;
   const unsigned long DEFAULT_TIME = 1357041600; // Jan 1 2013
@@ -322,8 +395,16 @@ void processSyncMessage() {
   if(Serial.find(TIME_HEADER)) {
      pctime = Serial.parseInt();
      if( pctime >= DEFAULT_TIME) { // check the integer is a valid time (greater than Jan 1 2013)
-       setTime(pctime); // Sync Arduino clock to the time received on the serial port
-       Serial.println("[SYS][CLOCK] Time Set.");
+       
+       
+       if(RTC.set(pctime) == 0){
+        setTime(RTC.get()); // Sync Arduino clock to the time received on the serial port
+        Serial.println("[SYS][CLOCK] Time Set."); 
+       }
+       else{
+        Serial << "\n[SYS][WARN]RTC was not set!";
+       }
+       
      }else{
       Serial.println("[SYS][CLOCK] Time input was rejected.");
      }
@@ -334,4 +415,22 @@ time_t requestSync()
 {
   Serial.write(TIME_REQUEST);  
   return 0; // the time will be sent later in response to serial mesg
+}
+
+String dump_byte_array(byte *buffer, byte bufferSize) {
+  String myString = String((char*)buffer);
+  Serial.println(myString);
+//  char * dest;
+//  for (int cnt = 0; cnt < bufferSize; cnt++)
+//  {
+//    // convert byte to its ascii representation
+//    sprintf(&dest[cnt * 2], "%02X", buffer[cnt]);
+//  }
+  
+    for (byte i = 0; i < bufferSize; i++) {
+        Serial.print(buffer[i] < 0x10 ? " 0" : " ");
+        Serial.print(buffer[i], HEX);
+    }
+
+    return myString;
 }
