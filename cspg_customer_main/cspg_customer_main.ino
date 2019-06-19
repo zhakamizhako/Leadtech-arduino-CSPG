@@ -29,24 +29,30 @@ constexpr uint8_t SS_PIN = 10;         // Configurable, see typical pin layout a
 MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
 // Init the DS1302
 // Set pins:  CE, IO,CLK
-DS1302RTC RTC(5, 6, 7);
+DS1302RTC RTC(5, 6, 7); // RTC Module
 time_t timeLeft = now(); // must be a unix value
-time_t t = now();
-int time_rate= 60; // time rate per tap in seconds 
+time_t t = now(); // Current time state
+int time_rate= 20; // time rate per tap in seconds 
 int load_rate = 10; // Load to decrease from card
-int pin_OUTPUT = 3;
+int screen_timeout = 5; // Seconds before screen turns off
+time_t screen_now = now(); // Seconds while action.
+int pin_OUTPUT = 3; // Pin for power output
+int pin_WAKE = 2; // Pin for Wake
 boolean active=false;
+boolean screen_sleep = false;
 char strTime[9]; //Lateral time string variable to display
 char strDate[15]; //Lateral time string variable to display
 
 byte sector         = 1;
 byte blockAddr      = 4;
-byte dataBlock[]    = { 
+byte dataBlock[]    = {  // Initial DataBlock array
   0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00  
 };
+
+uint8_t ramBuffer[31]; // RAM Buffer Array for RTC
 
 //u8glib
 U8GLIB_SSD1306_128X64 u8g(18, 20, 26, 24);  // SW SPI Com: SCK = 13, MOSI = 11, CS = 10, A0 = 9
@@ -56,40 +62,12 @@ U8GLIB_SSD1306_128X64 u8g(18, 20, 26, 24);  // SW SPI Com: SCK = 13, MOSI = 11, 
 //            lcd(RS,  E, d4, d5, d6, d7)
 //LiquidCrystal lcd(8,   9,  4,  5,  6,  7);
 
-void draw(void) {
-  // graphic commands to redraw the complete screen should be placed here  
-  u8g.setFont(u8g_font_unifont);
-  //u8g.setFont(u8g_font_osb21);
-  u8g.drawStr( 0, 22, "This is CSPG");
-}
-
-void draw_str(const char *s) {
-  u8g.firstPage();  
-  do {
-    u8g.drawStr( 0, 22, s);
-  } while( u8g.nextPage() );
-}
-
-void draw_str(const char * strLine1, const char * strLine2) {
-  u8g.firstPage();  
-  do {
-    u8g.drawStr( 0, 22, strLine1);
-    u8g.drawStr( 0, 44, strLine2);
-  } while( u8g.nextPage() );
-}
-
-void draw_str(unsigned int x, unsigned int y, const char *s) {
-  u8g.firstPage();  
-  do {
-    u8g.drawStr( x, y, s);
-  } while( u8g.nextPage() );
-}
-
 void setup()
 {
   pinMode(8, OUTPUT);
   pinMode(pin_OUTPUT, OUTPUT);
   digitalWrite(pin_OUTPUT, LOW);
+  pinMode(pin_WAKE, INPUT_PULLUP);
   Serial.begin(115200);
   Serial.println("[SYS][BOOT]CPSG System");
   Serial.println(BUILD_NUMBER);
@@ -156,37 +134,57 @@ void setup()
         key.keyByte[i] = 0xFF;
     }
   dump_byte_array(key.keyByte, MFRC522::MF_KEY_SIZE);
+  RTC.readRAM(ramBuffer);
+  bufferDump("Buffer read from RAM...");
+  
+  screen_now = now() + screen_timeout;
+  Serial << "\n[SYS][BOOT] Ready.";
   //Add something below here that reads the CMOS RAM to read the remaining time. Most likely a UNIX timestamp, write to time_t timeLeft.
 }
 
 void loop()
 {
-  // Display time centered on the upper line
+  if(digitalRead(pin_WAKE) == LOW){// wake button handler
+    Serial.println("Wake Pressed");
+   wakeScreen();
+  }
+
+//  if(screen_sleep == true){
+//    u8g.sleepOff();
+//  }
+  handleTimeout();
+  
+  // Current Time Handler
   if(!active){
     GetTimeInStr(strTime, hour(), minute(), second());
   GetDateInStr(strDate, weekday(), month(), day(), year());
   draw_str(strTime, strDate);
   }
-  
-//  Serial.println(strTime);
-//  Serial.println(strDate);
+
+  //Serial Input Handler -- for Time Sync Purposes
   if (Serial.available()) { // Time syncer via Serial monitor
     Serial.println("[SYS]Serial Monitor Activity");
     processSyncMessage();
   }
 
+  // Active Power Handler
   if(active){
     if(now()<timeLeft){
     time_t a = timeLeft - now();
-//    Serial << second(a);
-    
     Serial << "\nTime Left:" << timeLeft - now() << "\n";
+    u8g.sleepOn();
     }
     
     if(now()>timeLeft){
       active=false;
       Serial << "\n[SYS][OUTPUT] Power deactivated.\n";
       digitalWrite(pin_OUTPUT, LOW);
+      wakeScreen();
+      draw_str("Time Expired.");
+      delay(1000);
+      draw_str("Powered OFF");
+      delay(2000);
+      wakeScreen();
     }
   }
   // Warning!
@@ -205,12 +203,61 @@ void loop()
   if ( ! mfrc522.PICC_ReadCardSerial()) {
     return;
   }else {
+    wakeScreen();
     handleReadRFID(); // card read handler
   }
   
 }
 
 //Utils
+// OLED Screen Section
+
+void wakeScreen() { //Screen Waker
+    screen_sleep = false;
+    screen_now = now() + screen_timeout;
+    u8g.sleepOff();
+}
+
+void handleTimeout(){
+  if(screen_sleep == false){ // screen timeout handler
+    if(  screen_now - now() <= 0){
+      Serial << "\n[SYS][OSD] Turning Screen Off...\n";
+      u8g.sleepOn();
+      screen_sleep = true;
+    }
+  }
+}
+
+void draw(void) {
+  // graphic commands to redraw the complete screen should be placed here  
+  u8g.setFont(u8g_font_unifont);
+  //u8g.setFont(u8g_font_osb21);
+  u8g.drawStr( 0, 22, "This is CSPG");
+}
+
+void draw_str(const char *s) {
+  u8g.firstPage();  
+  do {
+    u8g.drawStr( 0, 22, s);
+  } while( u8g.nextPage() );
+}
+
+void draw_str(const char * strLine1, const char * strLine2) {
+  u8g.firstPage();  
+  do {
+    u8g.drawStr( 0, 22, strLine1);
+    u8g.drawStr( 0, 44, strLine2);
+  } while( u8g.nextPage() );
+}
+
+void draw_str(unsigned int x, unsigned int y, const char *s) {
+  u8g.firstPage();  
+  do {
+    u8g.drawStr( x, y, s);
+  } while( u8g.nextPage() );
+}
+
+//RFID Section and its handlers
 void handleReadRFID() {
   draw_str("[RFID]Reading IDCARD...");
   
@@ -262,14 +309,15 @@ void handleReadRFID() {
       }else{
       String temp = "Bal.: ";
       temp += y;
-      String line2 = "Loaded!";
+      String line2 = "Loaded! Power ON";
       char screenBuffer[20]; 
       char screenBuffer2[20];
       temp.toCharArray(screenBuffer2, temp.length()+1);
       line2.toCharArray(screenBuffer,line2.length()+1);
       draw_str(screenBuffer2, screenBuffer);
       handleActive();
-      delay(1000);  
+      delay(3000);  
+      wakeScreen();
       }
       
     }else{
@@ -283,6 +331,7 @@ void handleReadRFID() {
     mfrc522.PCD_StopCrypto1();
 }
 
+//Power Handler Section
 void handleActive() {
   if(!active){
     active = true;
@@ -297,6 +346,7 @@ void handleActive() {
   Serial << "\n[SYS][EPOCH]=" << timeLeft << "\n";
 }
 
+//Miscellaneous Utility Functions
 //Format time in a nice string to be displayed
 //Parameters: (string container, hour, min, sec)
 void GetTimeInStr(char * vString, int vHour, int vMinute, int vSecond){
@@ -388,9 +438,9 @@ void GetDateInStr(char * vString, int vWeekday, int vMonth, int vDay, int vYear)
     
   strcpy(vString, tStr1);
 }
+
 //Process Time via Serial Monitor function
 //Should add a verifier for this to avoid cheating.
-
 void processSyncMessage() {
   unsigned long pctime;
   const unsigned long DEFAULT_TIME = 1357041600; // Jan 1 2013
@@ -436,4 +486,19 @@ String dump_byte_array(byte *buffer, byte bufferSize) {
     }
 
     return myString;
+}
+
+void bufferDump(const char *msg)
+{
+  Serial.println(msg);
+  for (int i=0; i<31; i++)
+  {
+    Serial.print("0x");
+    if(ramBuffer[i] <= 0xF) Serial.print("0");
+    Serial.print(ramBuffer[i], HEX);
+    Serial.print(" ");
+    if(!((i+1) % 8)) Serial.println();
+  }
+  Serial.println();
+  Serial.println("--------------------------------------------------------");
 }
