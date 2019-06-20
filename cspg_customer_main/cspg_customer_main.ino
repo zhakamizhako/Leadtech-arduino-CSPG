@@ -1,8 +1,8 @@
 #include <Streaming.h> // Easy Serial out
 
-#define VERSION "v0.001b" // Software Version
+#define VERSION "v0.004b" // Software Version
 #define DEV_MESSAGE "Roland Kim Andre Solon"
-#define BUILD_NUMBER "Build 0001 06/16/19"
+#define BUILD_NUMBER "Build 0001 06/20/19"
 #define UID "DEV-0000-0001"
 //Leadtech
 //Arduino sketch for CSPG customer module
@@ -32,17 +32,21 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
 DS1302RTC RTC(5, 6, 7); // RTC Module
 time_t timeLeft = now(); // must be a unix value
 time_t t = now(); // Current time state
-int time_rate= 20; // time rate per tap in seconds 
+long time_rate= 259200; // time rate per tap in seconds 
+//long time_rate = 20;
 int load_rate = 10; // Load to decrease from card
-int screen_timeout = 5; // Seconds before screen turns off
+int screen_timeout = 10; // Seconds before screen turns off
 time_t screen_now = now(); // Seconds while action.
 int pin_OUTPUT = 3; // Pin for power output
 int pin_WAKE = 2; // Pin for Wake
 boolean active=false;
 boolean screen_sleep = false;
+byte uid[] = {0x54, 0x45, 0x53, 0x54, 0x5f, 0x43, 0x41, 0x52, 0x44, 0x31}
 char strTime[9]; //Lateral time string variable to display
 char strDate[15]; //Lateral time string variable to display
-
+ char strLine1[9];
+ char strLine2[15];
+ 
 byte sector         = 1;
 byte blockAddr      = 4;
 byte dataBlock[]    = {  // Initial DataBlock array
@@ -75,6 +79,7 @@ void setup()
   Serial.println(DEV_MESSAGE);
   Serial.println(UID);
   //reset OLED display
+  Serial << "\nRate:" << time_rate << "\n";
   digitalWrite(22, LOW);
   digitalWrite(22, HIGH);
 //  readRAM( uint8_t *p);
@@ -134,8 +139,27 @@ void setup()
         key.keyByte[i] = 0xFF;
     }
   dump_byte_array(key.keyByte, MFRC522::MF_KEY_SIZE);
-  RTC.readRAM(ramBuffer);
-  bufferDump("Buffer read from RAM...");
+  initBuffer();
+  if(digitalRead(pin_WAKE)==HIGH){
+    RTC.readRAM(ramBuffer);
+    bufferDump("Reading CMOS Data...");
+    String myString = String((char*)ramBuffer);
+    Serial.println(myString);
+    if(myString.toInt() > now()){
+      Serial << "\nResuming Timer Operations";
+      timeLeft = myString.toInt();
+      active = true;
+      digitalWrite(pin_OUTPUT,HIGH);
+    } else{
+      Serial << "\nTimer already has expired. Ignoring.";
+      active = false;
+    }
+  }else if(digitalRead(pin_WAKE)==LOW){
+   initBuffer();
+   Serial << "[SYS] Clearing CMOS RAM" ;
+   writeBuffer(0);
+  }
+  
   
   screen_now = now() + screen_timeout;
   Serial << "\n[SYS][BOOT] Ready.";
@@ -144,49 +168,32 @@ void setup()
 
 void loop()
 {
+  handleTimeout();
+  if (Serial.available()) { // Time syncer via Serial monitor
+    Serial.println("[SYS]Serial Monitor Activity");
+    processSyncMessage();
+  }
+  
   if(digitalRead(pin_WAKE) == LOW){// wake button handler
-    Serial.println("Wake Pressed");
+    Serial.println("[SYS][UI] Wake Pressed");
    wakeScreen();
   }
-
-//  if(screen_sleep == true){
-//    u8g.sleepOff();
-//  }
-  handleTimeout();
+  
   
   // Current Time Handler
   if(!active){
     GetTimeInStr(strTime, hour(), minute(), second());
   GetDateInStr(strDate, weekday(), month(), day(), year());
   draw_str(strTime, strDate);
-  }
-
-  //Serial Input Handler -- for Time Sync Purposes
-  if (Serial.available()) { // Time syncer via Serial monitor
-    Serial.println("[SYS]Serial Monitor Activity");
-    processSyncMessage();
-  }
-
-  // Active Power Handler
-  if(active){
-    if(now()<timeLeft){
-    time_t a = timeLeft - now();
-    Serial << "\nTime Left:" << timeLeft - now() << "\n";
-    u8g.sleepOn();
-    }
+  }else{
     
-    if(now()>timeLeft){
-      active=false;
-      Serial << "\n[SYS][OUTPUT] Power deactivated.\n";
-      digitalWrite(pin_OUTPUT, LOW);
-      wakeScreen();
-      draw_str("Time Expired.");
-      delay(1000);
-      draw_str("Powered OFF");
-      delay(2000);
-      wakeScreen();
+    if(now()<timeLeft){
+    drawTime();
+    }else if(now()>timeLeft){
+      powerOff();
     }
   }
+  
   // Warning!
   /*if(timeStatus() != timeSet) {
     //lcd.setCursor(0, 1);
@@ -209,6 +216,31 @@ void loop()
   
 }
 
+void powerOff(){
+active=false;
+      Serial << "\n[SYS][OUTPUT] Power deactivated.\n";
+      digitalWrite(pin_OUTPUT, LOW);
+      wakeScreen();
+      draw_str("Time Expired.");
+      delay(1000);
+      draw_str("Powered OFF");
+      delay(2000);
+//      wakeScreen();
+}
+
+void drawTime(){
+ long days =  ((timeLeft - now())/60/60/24);
+ long hours = ((timeLeft - now())/60/60 - days * 24);
+ long minutes ((timeLeft - now())/60 - hours*60 - days * 60 * 24 );
+ long seconds = ((((timeLeft - now()) - minutes*60) - hours * 60 * 60)  - days * 60 * 60 * 24);
+
+
+//    Serial << "\n" << days << ":" << hours << ":" <<minutes <<":" << seconds <<"\n" ;
+convertString(strLine1, days );
+GetTimeInStr(strLine2, hours, minutes, seconds);
+    draw_str(strLine1, strLine2);
+}
+
 //Utils
 // OLED Screen Section
 
@@ -219,6 +251,7 @@ void wakeScreen() { //Screen Waker
 }
 
 void handleTimeout(){
+//  Serial << "\n" << screen_now - now();
   if(screen_sleep == false){ // screen timeout handler
     if(  screen_now - now() <= 0){
       Serial << "\n[SYS][OSD] Turning Screen Off...\n";
@@ -273,7 +306,7 @@ void handleReadRFID() {
         Serial.println(mfrc522.GetStatusCodeName(status));
         return;
     }
-    Serial << "[SYS][RFID] Reading Data";
+    Serial << "\n[SYS][RFID] Reading Data\n";
     status = (MFRC522::StatusCode) mfrc522.MIFARE_Read(blockAddr, buffer, &size);
     if (status != MFRC522::STATUS_OK) {
         draw_str("RFID Data Error");
@@ -281,6 +314,7 @@ void handleReadRFID() {
         Serial.println(mfrc522.GetStatusCodeName(status));
     }
 
+    //Below code is for verified cards
     String load = dump_byte_array(buffer, 16);
     int load_int = load.toInt();
     if(load_int - load_rate >= 0){
@@ -309,15 +343,15 @@ void handleReadRFID() {
       }else{
       String temp = "Bal.: ";
       temp += y;
-      String line2 = "Loaded! Power ON";
+      String line2 = "Loaded!";
       char screenBuffer[20]; 
       char screenBuffer2[20];
       temp.toCharArray(screenBuffer2, temp.length()+1);
       line2.toCharArray(screenBuffer,line2.length()+1);
       draw_str(screenBuffer2, screenBuffer);
       handleActive();
-      delay(3000);  
-      wakeScreen();
+      delay(2000);  
+//      wakeScreen();
       }
       
     }else{
@@ -333,16 +367,20 @@ void handleReadRFID() {
 
 //Power Handler Section
 void handleActive() {
+  initBuffer();
+  Serial << "\nTime Rate:" << time_rate << "\n";
   if(!active){
     active = true;
     digitalWrite(pin_OUTPUT,HIGH);
     Serial << "\n[SYS][OUTPUT]Power Active!\n";
+    
     timeLeft = now() + time_rate;
   }else{
     timeLeft = timeLeft + time_rate;
     Serial << "\n[SYS][OUTPUT]Added\n";
   }
   //TODO: Use the CMOS RAM to store remaining time. Else, shit happens
+  writeBuffer(timeLeft);
   Serial << "\n[SYS][EPOCH]=" << timeLeft << "\n";
 }
 
@@ -350,8 +388,8 @@ void handleActive() {
 //Format time in a nice string to be displayed
 //Parameters: (string container, hour, min, sec)
 void GetTimeInStr(char * vString, int vHour, int vMinute, int vSecond){
-  char tStr1[3];
-  char tStr2[3];
+  char tStr1[5];
+  char tStr2[5];
 
   //Display always in double digit
   if(vHour < 10){
@@ -392,6 +430,19 @@ void GetTimeInStr(char * vString, int vHour, int vMinute, int vSecond){
 
 //Format time in a nice string to be displayed
 //Parameters: (string container, weekday, month, date, year)
+void convertString(char * vString, int vDay){
+  char string[30];
+  char tStr2[20];
+  strcpy(string, "Time Left:");
+  if(vDay>0){
+        itoa(vDay, tStr2, 10);
+  strcat(string, tStr2);  
+  }else{
+    strcat(string, "0");
+  }
+  strcat(string, " days");
+  strcpy(vString, string);
+}
 void GetDateInStr(char * vString, int vWeekday, int vMonth, int vDay, int vYear){
   char tStr1[4];
   char tStr2[5];
@@ -501,4 +552,30 @@ void bufferDump(const char *msg)
   }
   Serial.println();
   Serial.println("--------------------------------------------------------");
+}
+
+void initBuffer(){
+ for(int i=0; i<31;i++){
+  ramBuffer[i] = 0x00; 
+ }
+}
+
+void writeBuffer(long timestamp){
+  String temp1;
+  temp1 += timestamp;
+  byte buff[31];
+  for(int i=0;i<temp1.length();i++){
+    buff[i] = (int) temp1[i];
+  }
+  initBuffer();
+  for(int i=0;i<temp1.length();i++){
+    ramBuffer[i] = buff[i];
+  }
+  RTC.writeEN(true);
+  RTC.writeRAM(ramBuffer);
+  RTC.writeEN(false);
+  initBuffer();
+  RTC.readRAM(ramBuffer);
+  bufferDump("Reading Newly input data");
+  
 }
