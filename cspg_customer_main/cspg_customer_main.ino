@@ -32,8 +32,8 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
 DS1302RTC RTC(5, 6, 7); // RTC Module
 time_t timeLeft = now(); // must be a unix value
 time_t t = now(); // Current time state
-long time_rate= 259200; // time rate per tap in seconds 
-//long time_rate = 20;
+//long time_rate= 259200; // time rate per tap in seconds 
+long time_rate = 20;
 int load_rate = 10; // Load to decrease from card
 int screen_timeout = 10; // Seconds before screen turns off
 time_t screen_now = now(); // Seconds while action.
@@ -41,11 +41,12 @@ int pin_OUTPUT = 3; // Pin for power output
 int pin_WAKE = 2; // Pin for Wake
 boolean active=false;
 boolean screen_sleep = false;
-byte uid[] = {0x54, 0x45, 0x53, 0x54, 0x5f, 0x43, 0x41, 0x52, 0x44, 0x31}
+byte uid[] = {0x54, 0x45, 0x53, 0x54, 0x5f, 0x43, 0x41, 0x52, 0x44, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 char strTime[9]; //Lateral time string variable to display
 char strDate[15]; //Lateral time string variable to display
  char strLine1[9];
  char strLine2[15];
+
  
 byte sector         = 1;
 byte blockAddr      = 4;
@@ -82,6 +83,7 @@ void setup()
   Serial << "\nRate:" << time_rate << "\n";
   digitalWrite(22, LOW);
   digitalWrite(22, HIGH);
+  draw_str("Booting");
 //  readRAM( uint8_t *p);
 //  writeRAM(uint8_t *p);
   
@@ -104,31 +106,34 @@ void setup()
 
   // Check clock oscillation  
   if (RTC.haltRTC())
-    draw_str("Warning! RTC has been reset!");
+  Serial << "[SYS][BOOT]RTC has been reset!";
   else
-    draw_str("RTC is running.");
+  Serial << "[SYS][BOOT]RTC is good";
+//    draw_str("RTC is running.");
     
-  delay(1000);
+//  delay(1000);
   
   // Check write-protection
-  if (RTC.writeEN())
-    draw_str("Write allowed");
-  else
-    draw_str("Write protected");
+//  if (RTC.writeEN())
+//    draw_str("Write allowed");
+//  else
+//    draw_str("Write protected");
 
-  delay ( 1000 );
+//  delay ( 1000 );
 
   // Setup Time library
-  draw_str("RTC Sync");
+//  draw_str("RTC Sync");
   setTime(00,52,30,2,6,2019); //hr,min,sec,day,mnth,yr
   setSyncProvider(RTC.get); // the function to get the time from the RTC
   
   if(timeStatus() == timeSet)
-    draw_str("RTC Synced");
+//    draw_str("RTC Synced");
+Serial << "[SYS][BOOT]RTC Synced";
   else
-    draw_str("RTC FAILED");
+  Serial << "[SYS][BOOT]RTC Warning!";
+//    draw_str("RTC FAILED");
 
-  delay ( 1000 );
+//  delay ( 1000 );
 
   SPI.begin();      // Init SPI bus
   mfrc522.PCD_Init();   // Init MFRC522
@@ -154,11 +159,12 @@ void setup()
       Serial << "\nTimer already has expired. Ignoring.";
       active = false;
     }
-  }else if(digitalRead(pin_WAKE)==LOW){
-   initBuffer();
-   Serial << "[SYS] Clearing CMOS RAM" ;
-   writeBuffer(0);
   }
+//  else if(digitalRead(pin_WAKE)==LOW){
+//   initBuffer();
+//   Serial << "[SYS] Clearing CMOS RAM" ;
+//   writeBuffer(0);
+//  }
   
   
   screen_now = now() + screen_timeout;
@@ -306,7 +312,26 @@ void handleReadRFID() {
         Serial.println(mfrc522.GetStatusCodeName(status));
         return;
     }
-    Serial << "\n[SYS][RFID] Reading Data\n";
+    Serial << "\n[SYS][RFID] Reading Auth Data\n";
+     status = (MFRC522::StatusCode) mfrc522.MIFARE_Read(5, buffer, &size);
+    if (status != MFRC522::STATUS_OK) {
+        draw_str("RFID Data Error");
+        Serial.print(F("MIFARE_Read() failed: "));
+        Serial.println(mfrc522.GetStatusCodeName(status));
+    }
+    String load_auth = dump_byte_array(buffer, 16);
+    Serial << "\n" <<load_auth <<"\n";
+    for(int i=0;i<16;i++){
+      if(load_auth[i] != uid[i]){
+        draw_str("Invalid RFID");
+        Serial << "[SYS]Invalid RFID UID";
+        mfrc522.PICC_HaltA();
+        mfrc522.PCD_StopCrypto1();
+        delay(2000);
+        return;
+      }
+    }
+    
     status = (MFRC522::StatusCode) mfrc522.MIFARE_Read(blockAddr, buffer, &size);
     if (status != MFRC522::STATUS_OK) {
         draw_str("RFID Data Error");
@@ -355,7 +380,9 @@ void handleReadRFID() {
       }
       
     }else{
-      draw_str("Insufficient Load");
+      char strtemp[5];
+      strcpy(strtemp, "Load");
+      draw_str("Insufficient", strtemp);
       Serial << "\n[SYS][RFID] Insufficient Load \n" << "Load Left: " << load_int << "\n";
       
       delay(1000);
